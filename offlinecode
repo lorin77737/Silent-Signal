@@ -1,0 +1,337 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include "DHT.h"
+#include <DNSServer.h>
+
+// ================= CONFIGURATION =================
+const char* ssid     = "Sensor Syndicate"; 
+const char* password = "Bjls@1234";     
+
+// --- PINS ---
+#define VIB_PIN    13
+#define DHT_PIN    14
+#define BUZZER_PIN 2
+
+// --- LED PINS ---
+#define LED_GREEN  18
+#define LED_BLUE   19
+#define LED_YELLOW 21
+#define LED_ORANGE 22
+
+#define DHTTYPE DHT11
+
+// ================= GLOBALS =================
+DHT dht(DHT_PIN, DHTTYPE);
+WebServer server(80);
+DNSServer dnsServer;
+
+float temperature = 0.0;
+float humidity = 0.0;
+int vibrationState = 0;
+int vibrationCount = 0;
+bool manualAlarm = false; 
+
+// Timer variables
+unsigned long previousMillis = 0;
+bool ledState = LOW;
+
+// ================= DASHBOARD HTML (Exact Style + Humidity Graph) =================
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Silent Signal | Monitor</title>
+    <style>
+        :root { --bg: #050a14; --card: rgba(20, 30, 50, 0.8); --cyan: #00fff5; --red: #ff073a; --green: #39ff14; --yellow: #ffbf00; --text: #e6f1ff; }
+        body { font-family: 'Segoe UI', monospace; background: radial-gradient(circle at 50% 50%, #0a1525 0%, #000 100%); color: var(--text); margin: 0; padding: 10px; min-height: 100vh; }
+        
+        h1 { margin: 0; font-size: 1.8rem; background: linear-gradient(45deg, var(--cyan), var(--green)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 20px rgba(0,255,245,0.3); letter-spacing: 2px; }
+        .subtitle { color: #8899ac; font-size: 0.7rem; letter-spacing: 3px; margin-bottom: 20px; text-transform: uppercase; }
+        
+        .grid { display: grid; gap: 15px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); max-width: 1200px; margin: 0 auto; }
+        .full-width { grid-column: 1 / -1; }
+        
+        .card { background: var(--card); border: 1px solid rgba(0,255,245,0.2); border-radius: 12px; padding: 15px; position: relative; backdrop-filter: blur(10px); box-shadow: 0 0 15px rgba(0,0,0,0.5); }
+        .card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--cyan); border-radius: 4px 0 0 4px; opacity: 0.5; }
+        .card.alert { border-color: var(--red); box-shadow: 0 0 20px rgba(255,7,58,0.2); }
+        .card.alert::before { background: var(--red); }
+
+        .label { font-size: 0.7rem; color: #8899ac; text-transform: uppercase; letter-spacing: 1px; }
+        .value { font-size: 2.2rem; font-weight: bold; font-family: 'Courier New', monospace; text-shadow: 0 0 10px rgba(255,255,255,0.1); }
+        .unit { font-size: 1rem; color: var(--cyan); }
+        
+        .status-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.6rem; margin-top: 5px; background: rgba(0,255,245,0.1); border: 1px solid var(--cyan); color: var(--cyan); }
+        .status-pill.danger { background: rgba(255,7,58,0.1); border-color: var(--red); color: var(--red); animation: blink 1s infinite; }
+        
+        .btn { width: 100%; padding: 15px; background: rgba(255,7,58,0.1); border: 1px solid var(--red); color: var(--red); font-weight: bold; cursor: pointer; text-transform: uppercase; letter-spacing: 2px; transition: 0.3s; margin-top: 10px; }
+        .btn:active, .btn.active { background: var(--red); color: #fff; box-shadow: 0 0 20px var(--red); }
+
+        .log-box { height: 150px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.7rem; border-top: 1px solid rgba(255,255,255,0.1); margin-top: 10px; }
+        .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .time { color: #556677; margin-right: 5px; }
+
+        canvas { width: 100%; height: 80px; margin-top: 10px; }
+        
+        @keyframes blink { 50% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+
+    <div style="text-align: center;">
+        <h1>SILENT SIGNAL</h1>
+        <div class="subtitle">INDUSTRIAL INFRASTRUCTURE MONITOR</div>
+    </div>
+
+    <div class="grid">
+        <div class="card full-width" id="sys-card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <div class="label">SYSTEM STATUS</div>
+                    <div id="status-text" style="font-size: 1.5rem; color: var(--green); font-weight: bold;">OPERATIONAL</div>
+                </div>
+                <div style="text-align: right;">
+                    <div class="label">UPTIME</div>
+                    <div id="uptime" style="font-family: monospace;">00:00:00</div>
+                </div>
+            </div>
+            <button id="siren-btn" class="btn" onclick="toggleSiren()">🚨 TEST SIREN SYSTEM</button>
+        </div>
+
+        <div class="card" id="card-temp">
+            <div class="label">🔥 POWER CORE (TEMP)</div>
+            <div><span id="temp" class="value">--</span><span class="unit">°C</span></div>
+            <div id="pill-temp" class="status-pill">NOMINAL</div>
+            <canvas id="chart-temp"></canvas>
+        </div>
+
+        <div class="card" id="card-vib">
+            <div class="label">⚙️ TURBINE A1 (VIB)</div>
+            <div><span id="vib" class="value">0</span><span class="unit">Hz</span></div>
+            <div id="pill-vib" class="status-pill">STABLE</div>
+            <canvas id="chart-vib"></canvas>
+        </div>
+
+        <div class="card">
+            <div class="label">💧 COOLING SYS (HUM)</div>
+            <div><span id="hum" class="value">--</span><span class="unit">%</span></div>
+            <div id="pill-hum" class="status-pill">OPTIMAL</div>
+            <canvas id="chart-hum"></canvas>
+        </div>
+
+        <div class="card full-width">
+            <div class="label">📢 LIVE EVENT TERMINAL</div>
+            <div class="log-box" id="logs">
+                <div class="log-entry"><span class="time">00:00:00</span> System Initialized...</div>
+                <div class="log-entry"><span class="time">00:00:01</span> Connecting to Sensors...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- CUSTOM NANO-CHART ENGINE ---
+        class NanoChart {
+            constructor(canvasId, color) {
+                this.canvas = document.getElementById(canvasId);
+                this.ctx = this.canvas.getContext('2d');
+                this.color = color;
+                this.data = new Array(30).fill(0);
+                this.canvas.width = this.canvas.offsetWidth;
+                this.canvas.height = 80;
+            }
+            push(val) {
+                this.data.push(val);
+                this.data.shift();
+                this.draw();
+            }
+            draw() {
+                const w = this.canvas.width; const h = this.canvas.height;
+                const ctx = this.ctx;
+                ctx.clearRect(0,0,w,h);
+                ctx.beginPath();
+                const max = Math.max(...this.data, 10);
+                const min = Math.min(...this.data, 0);
+                const step = w / (this.data.length - 1);
+                
+                this.data.forEach((val, i) => {
+                    const x = i * step;
+                    const range = max - min || 1; 
+                    const y = h - ((val - min) / range * (h * 0.8)) - 5;
+                    if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                });
+                
+                ctx.strokeStyle = this.color; ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = this.color;
+                ctx.stroke();
+                
+                // Fill
+                ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.fillStyle = this.color + "22"; ctx.fill();
+            }
+        }
+
+        const chartTemp = new NanoChart('chart-temp', '#00fff5');
+        const chartVib = new NanoChart('chart-vib', '#39ff14');
+        const chartHum = new NanoChart('chart-hum', '#00fff5'); // Added Humidity Graph
+        
+        let alarmOn = false;
+
+        function toggleSiren() {
+            alarmOn = !alarmOn;
+            const btn = document.getElementById('siren-btn');
+            if(alarmOn) { btn.innerText = "⏹ STOP TEST"; btn.classList.add('active'); log("CMD: MANUAL SIREN TEST STARTED"); }
+            else { btn.innerText = "🚨 TEST SIREN SYSTEM"; btn.classList.remove('active'); log("CMD: SIREN TEST STOPPED"); }
+            fetch('/cmd?s=' + (alarmOn ? '1' : '0'));
+        }
+
+        function log(msg) {
+            const box = document.getElementById('logs');
+            const t = new Date().toLocaleTimeString().split(' ')[0];
+            box.innerHTML = `<div class="log-entry"><span class="time">${t}</span> ${msg}</div>` + box.innerHTML;
+        }
+
+        setInterval(() => {
+            fetch('/data').then(r => r.json()).then(d => {
+                document.getElementById('temp').innerText = d.t.toFixed(1);
+                document.getElementById('hum').innerText = d.h.toFixed(0);
+                document.getElementById('vib').innerText = d.v;
+                document.getElementById('uptime').innerText = d.up;
+
+                // Update Graphs
+                chartTemp.push(d.t);
+                chartVib.push(d.v); 
+                chartHum.push(d.h); // Push humidity data
+
+                // Logic: Temp
+                const pTemp = document.getElementById('pill-temp');
+                if(d.t > 45) { pTemp.innerText = "CRITICAL"; pTemp.className = "status-pill danger"; chartTemp.color = "#ff073a"; }
+                else if(d.t > 30) { pTemp.innerText = "WARNING"; pTemp.className = "status-pill"; pTemp.style.color = "#ffbf00"; chartTemp.color = "#ffbf00"; }
+                else { pTemp.innerText = "NOMINAL"; pTemp.className = "status-pill"; pTemp.style.color = "#00fff5"; chartTemp.color = "#00fff5"; }
+
+                // Logic: Vib
+                const pVib = document.getElementById('pill-vib');
+                const cVib = document.getElementById('card-vib');
+                if(d.v == 1) { 
+                    pVib.innerText = "FAILURE DETECTED"; pVib.className = "status-pill danger"; 
+                    cVib.classList.add('alert'); chartVib.color = "#ff073a";
+                    if(d.v_ev) log("⚠️ ALERT: TURBINE VIBRATION SPIKE!");
+                } else { 
+                    pVib.innerText = "STABLE"; pVib.className = "status-pill"; 
+                    cVib.classList.remove('alert'); chartVib.color = "#39ff14";
+                }
+
+                // Global Status
+                const stat = document.getElementById('status-text');
+                if(d.v == 1 || d.t > 45 || alarmOn) { stat.innerText = "CRITICAL ALERT"; stat.style.color = "#ff073a"; }
+                else { stat.innerText = "OPERATIONAL"; stat.style.color = "#39ff14"; }
+
+            });
+        }, 500);
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// ================= C++ FUNCTIONS =================
+void handleData() {
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  int currentVib = digitalRead(VIB_PIN);
+  
+  if (isnan(temperature)) temperature = 0.0;
+  if (isnan(humidity)) humidity = 0.0;
+
+  bool vibEvent = false;
+  if (currentVib == 1 && vibrationState == 0) {
+     vibEvent = true;
+     vibrationCount++;
+  }
+  vibrationState = currentVib;
+
+  unsigned long now = millis();
+  int h = (now / 3600000);
+  int m = (now % 3600000) / 60000;
+  int s = ((now % 3600000) % 60000) / 1000;
+  char timeStr[10]; sprintf(timeStr, "%02d:%02d:%02d", h, m, s);
+
+  String json = "{";
+  json += "\"t\":" + String(temperature) + ",";
+  json += "\"h\":" + String(humidity) + ",";
+  json += "\"v\":" + String(vibrationState) + ",";
+  json += "\"v_ev\":" + String(vibEvent) + ",";
+  json += "\"up\":\"" + String(timeStr) + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleCommand() {
+  if (server.hasArg("s")) {
+    manualAlarm = (server.arg("s") == "1");
+    server.send(200, "text/plain", "OK");
+  } else server.send(400, "text/plain", "ERR");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(VIB_PIN, INPUT);
+  dht.begin();
+  
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(LED_ORANGE, OUTPUT);
+
+  WiFi.softAP(ssid, password);
+  dnsServer.start(53, "*", WiFi.softAPIP()); // Redirect ALL traffic to this IP
+  server.onNotFound([]() { server.send(200, "text/html", index_html); }); // Catch-all for "connectivity check" URLs
+  
+  server.on("/", [](){ server.send(200, "text/html", index_html); });
+  server.on("/data", handleData);
+  server.on("/cmd", handleCommand);
+  server.begin();
+
+  digitalWrite(LED_GREEN, HIGH); delay(100); digitalWrite(LED_BLUE, HIGH); delay(100);
+  digitalWrite(LED_YELLOW, HIGH); delay(100); digitalWrite(LED_ORANGE, HIGH); delay(100);
+  digitalWrite(BUZZER_PIN, HIGH); delay(200); digitalWrite(BUZZER_PIN, LOW);
+  delay(500);
+  digitalWrite(LED_GREEN, LOW); digitalWrite(LED_BLUE, LOW); digitalWrite(LED_YELLOW, LOW); digitalWrite(LED_ORANGE, LOW);
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+  
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  vibrationState = digitalRead(VIB_PIN);
+  if (isnan(temperature)) temperature = 0.0;
+  if (isnan(humidity)) humidity = 0.0;
+
+  if (millis() - previousMillis >= 200) {
+    previousMillis = millis();
+    ledState = !ledState;
+  }
+
+  // 1. GREEN (Safe / Heat Warning)
+  if (temperature > 30) digitalWrite(LED_GREEN, ledState);
+  else digitalWrite(LED_GREEN, HIGH);
+
+  // 2. BLUE (Moisture)
+  if (humidity > 80) digitalWrite(LED_BLUE, ledState);
+  else digitalWrite(LED_BLUE, LOW);
+
+  // 3. YELLOW (Vibration)
+  if (vibrationState == 1) digitalWrite(LED_YELLOW, ledState);
+  else digitalWrite(LED_YELLOW, LOW);
+
+  // 4. ORANGE + BUZZER (Critical)
+  if (temperature > 45 || vibrationState == 1 || manualAlarm) {
+    digitalWrite(LED_ORANGE, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
+  } else {
+    digitalWrite(LED_ORANGE, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+  
+  delay(10);
+}
