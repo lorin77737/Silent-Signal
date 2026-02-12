@@ -259,17 +259,3 @@ Deactivate manual siren.
 Hackathons, industrial monitoring demos, IoT prototypes, and safety system simulations.
 
 ---
-
-# 🔥 Silent Signal
-
-### “When Silence Speaks, Systems Survive.”
-
----
-
-If you want, I can also generate:
-
-* ⭐ A shorter hackathon submission README
-* 📄 A technical documentation version
-* 🎤 A project presentation script
-* 📊 PPT content
-* 🧠 Architecture diagram explanation
