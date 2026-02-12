@@ -1,0 +1,160 @@
+/*
+   SILENT SIGNAL - "WARNING ALERT!🚨" EDITION
+   - Notification Title: Controlled by Blynk Dashboard Settings!
+   - Temp > 30°C: WARNING (Blinks Green + Beeps + Phone Alert)
+   - Temp < 17°C: CRITICAL (Orange Light + Steady Siren + Phone Alert)
+   - Temp > 45°C: CRITICAL (Orange Light + Steady Siren + Phone Alert)
+   - Vibration:   CRITICAL (Orange Light + Steady Siren + Phone Alert)
+*/
+
+// ================= 1. BLYNK CONFIGURATION =================
+#define BLYNK_TEMPLATE_ID   "TMPL3RvEKUPjR" 
+#define BLYNK_TEMPLATE_NAME "Silent Signal"
+#define BLYNK_AUTH_TOKEN    "NuvSM4zTG_7cabAW9dsijmqFTrv0cBYR" 
+
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include "DHT.h"
+
+// ================= 2. INTERNET CONFIGURATION =================
+char ssid[] = "Sensor Syndicate";  
+char pass[] = "Bjls@1234";
+
+// ================= 3. HARDWARE PINS =================
+#define VIB_PIN    13
+#define DHT_PIN    14
+#define BUZZER_PIN 2
+
+// LED Status Lights
+#define LED_GREEN  18  
+#define LED_BLUE   19  
+#define LED_YELLOW 21  // VIBRATION LED
+#define LED_ORANGE 22  // CRITICAL LED
+
+#define DHTTYPE DHT11
+DHT dht(DHT_PIN, DHTTYPE);
+BlynkTimer timer;
+
+// Data Variables
+float temperature = 0.0;
+float humidity = 0.0;
+int vibrationState = 0;
+
+// Alert Flags
+bool isCriticalSent = false; 
+bool isWarningSent = false;
+
+// ================= 4. MAIN LOGIC LOOP =================
+void myTimerEvent() {
+  // --- A. READ SENSORS ---
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  vibrationState = digitalRead(VIB_PIN);
+  
+  if (isnan(t)) t = 0;
+  if (isnan(h)) h = 0;
+  
+  temperature = t;
+  humidity = h;
+
+  // --- B. SEND TO CLOUD ---
+  Blynk.virtualWrite(V0, temperature);
+  Blynk.virtualWrite(V1, humidity);
+  Blynk.virtualWrite(V2, vibrationState);
+
+  // --- C. LOGIC DECISION TREE ---
+  
+  // ==========================================================
+  // CONDITION 1: CRITICAL EMERGENCY
+  // Trigger: Vibration OR Temp > 45 OR Temp < 17
+  // ==========================================================
+  if (vibrationState == 1 || temperature > 45 || (temperature < 17 && temperature != 0)) {
+    
+    // Pulse the alarm (Blink Orange + Siren)
+    bool pulse = !digitalRead(LED_ORANGE);
+    digitalWrite(LED_ORANGE, pulse); 
+    digitalWrite(BUZZER_PIN, pulse); 
+    digitalWrite(LED_GREEN, LOW);
+
+    // If Vibration, Blink Yellow too
+    if (vibrationState == 1) digitalWrite(LED_YELLOW, pulse);
+    else digitalWrite(LED_YELLOW, LOW);
+    
+    // Determine Message Content
+    String msg = "System Failure Detected";
+    if (temperature < 17) msg = "Freezing Temp (<17°C)";
+    if (temperature > 45) msg = "Overheating (>45°C)";
+    if (vibrationState == 1) msg = "Heavy Vibration Detected";
+
+    // Send Notification
+    if (!isCriticalSent) {
+      // The TITLE comes from Dashboard ("Warning Alert!🚨")
+      // The MESSAGE comes from here:
+      Blynk.logEvent("critical_alert", msg); 
+      isCriticalSent = true; 
+    }
+    isWarningSent = false; 
+  }
+  
+  // ==========================================================
+  // CONDITION 2: WARNING STATE (Temp > 30)
+  // ==========================================================
+  else if (temperature > 30) {
+    
+    digitalWrite(LED_ORANGE, LOW);
+    digitalWrite(LED_YELLOW, LOW);
+    isCriticalSent = false;
+
+    // Blink Green + Buzzer
+    bool state = !digitalRead(LED_GREEN); 
+    digitalWrite(LED_GREEN, state); 
+    digitalWrite(BUZZER_PIN, state); 
+
+    if (!isWarningSent) {
+      Blynk.logEvent("critical_alert", "High Temp Warning (>30°C)"); 
+      isWarningSent = true; 
+    }
+  }
+  
+  // ==========================================================
+  // CONDITION 3: SAFE STATE
+  // ==========================================================
+  else {
+    digitalWrite(LED_GREEN, HIGH); // Solid Green
+    digitalWrite(LED_ORANGE, LOW);
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(BUZZER_PIN, LOW); // Silence
+    
+    isCriticalSent = false;
+    isWarningSent = false;
+  }
+
+  // Humidity LED
+  if (humidity > 80) digitalWrite(LED_BLUE, HIGH);
+  else digitalWrite(LED_BLUE, LOW);
+}
+
+// ================= 5. SETUP =================
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(VIB_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(LED_ORANGE, OUTPUT);
+  
+  dht.begin();
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+  
+  timer.setInterval(500L, myTimerEvent);
+}
+
+// ================= 6. LOOP =================
+void loop() {
+  Blynk.run(); 
+  timer.run(); 
+}
